@@ -3,63 +3,125 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Clean vs Dirty Hands</title>
+  <title>Hand Cleanliness Classifier</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; }
     #label-container div { margin: 6px 0; }
-    button { padding: 10px 14px; cursor: pointer; }
-    canvas { border: 1px solid #ccc; margin-top: 12px; }
+    button, select { padding: 10px 14px; cursor: pointer; margin-right: 8px; }
+    video { border: 1px solid #ccc; margin-top: 12px; }
   </style>
 </head>
+
 <body>
   <h2>Hand Cleanliness Classifier</h2>
-  <p>Click start, allow camera, and the model will show predictions.</p>
+  <p>Select camera, click Start, allow camera, and the model will show predictions.</p>
 
-  <button onclick="init()">Start Camera</button>
+  <label for="cameraMode">Camera:</label>
+  <select id="cameraMode">
+    <option value="user">Front Camera</option>
+    <option value="environment">Back Camera</option>
+  </select>
 
-  <div id="webcam-container"></div>
-  <div id="label-container"></div>
+  <button onclick="start()">Start</button>
+  <button onclick="switchCamera()">Switch</button>
 
+  <div style="margin-top:12px;">
+    <video id="video" width="320" height="240" autoplay playsinline muted></video>
+    <canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
+  </div>
+
+  <div id="label-container" style="margin-top:12px;"></div>
+
+  <!-- Libraries -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
 
+  <!-- Custom JS -->
   <script>
-    let model, webcam, labelContainer, maxPredictions;
+    let model, maxPredictions;
+    let stream = null;
+    let currentFacingMode = "user"; // "user" = front, "environment" = back
 
-    async function init() {
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const labelContainer = document.getElementById("label-container");
+    const cameraModeSelect = document.getElementById("cameraMode");
+
+    async function loadModelOnce() {
+      if (model) return;
       const URL = "./model/";
-      const modelURL = URL + "model.json";
-      const metadataURL = URL + "metadata.json";
-
-      model = await tmImage.load(modelURL, metadataURL);
+      model = await tmImage.load(URL + "model.json", URL + "metadata.json");
       maxPredictions = model.getTotalClasses();
 
-      const flip = true;
-      webcam = new tmImage.Webcam(320, 240, flip);
-
-      await webcam.setup();  // ask camera permission
-      await webcam.play();
-
-      document.getElementById("webcam-container").innerHTML = "";
-      document.getElementById("webcam-container").appendChild(webcam.canvas);
-
-      labelContainer = document.getElementById("label-container");
       labelContainer.innerHTML = "";
       for (let i = 0; i < maxPredictions; i++) {
         labelContainer.appendChild(document.createElement("div"));
       }
+    }
 
+    async function start() {
+      await loadModelOnce();
+      currentFacingMode = cameraModeSelect.value;
+      await startCamera(currentFacingMode);
       window.requestAnimationFrame(loop);
     }
 
+    async function switchCamera() {
+      currentFacingMode = (currentFacingMode === "user") ? "environment" : "user";
+      cameraModeSelect.value = currentFacingMode;
+      await startCamera(currentFacingMode);
+    }
+
+    async function startCamera(facingMode) {
+      // stop previous stream if any
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: facingMode, // "user" or "environment"
+          width: { ideal: 320 },
+          height: { ideal: 240 }
+        }
+      };
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (e) {
+        // fallback if some devices don't support facingMode properly
+        console.warn("Requested camera mode failed, falling back to default camera. Reason:", e);
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
+
+      video.srcObject = stream;
+      await video.play();
+    }
+
     async function loop() {
-      webcam.update();
+      // draw video to canvas (mirror front camera only)
+      const flip = (currentFacingMode === "user");
+      const w = canvas.width, h = canvas.height;
+
+      ctx.save();
+      if (flip) {
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, -w, 0, w, h);
+      } else {
+        ctx.drawImage(video, 0, 0, w, h);
+      }
+      ctx.restore();
+
       await predict();
       window.requestAnimationFrame(loop);
     }
 
     async function predict() {
-      const prediction = await model.predict(webcam.canvas);
+      const prediction = await model.predict(canvas);
       for (let i = 0; i < maxPredictions; i++) {
         const p = prediction[i];
         labelContainer.childNodes[i].innerText =
