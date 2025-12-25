@@ -6,12 +6,15 @@
   <title>Hand Cleanliness Classifier</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; }
-    #label-container div { margin: 6px 0; }
-    button, select, input { padding: 10px 14px; cursor: pointer; margin-right: 8px; }
-    video, img { border: 1px solid #ccc; margin-top: 12px; max-width: 100%; }
-    .row { margin-top: 12px; }
+    h2, h3 { margin-bottom: 8px; }
+    .muted { color: #666; font-size: 0.95rem; margin-top: 0; }
     .section { margin-top: 18px; padding-top: 12px; border-top: 1px solid #eee; }
-    .muted { color: #666; font-size: 0.95rem; }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    button, select, input { padding: 10px 14px; cursor: pointer; }
+    video, img { border: 1px solid #ccc; margin-top: 12px; max-width: 100%; border-radius: 6px; }
+    #label-container div { margin: 6px 0; }
+    .status { margin-top: 10px; font-size: 0.95rem; }
+    .best { margin-top: 10px; font-weight: bold; }
   </style>
 </head>
 
@@ -21,18 +24,19 @@
 
   <div class="section">
     <h3>Webcam</h3>
+    <div class="controls">
+      <label for="cameraMode">Camera:</label>
+      <select id="cameraMode">
+        <option value="user">Front Camera</option>
+        <option value="environment">Back Camera</option>
+      </select>
 
-    <label for="cameraMode">Camera:</label>
-    <select id="cameraMode">
-      <option value="user">Front Camera</option>
-      <option value="environment">Back Camera</option>
-    </select>
+      <button id="startWebcamBtn">Start Webcam</button>
+      <button id="switchBtn">Switch</button>
+      <button id="stopWebcamBtn">Stop Webcam</button>
+    </div>
 
-    <button onclick="startWebcam()">Start Webcam</button>
-    <button onclick="switchCamera()">Switch</button>
-    <button onclick="stopWebcam()">Stop Webcam</button>
-
-    <div class="row">
+    <div>
       <video id="video" width="320" height="240" autoplay playsinline muted></video>
       <canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
     </div>
@@ -40,16 +44,20 @@
 
   <div class="section">
     <h3>Upload Image</h3>
-    <input id="fileInput" type="file" accept="image/*" />
-    <button onclick="predictUploadedImage()">Predict Uploaded Image</button>
+    <div class="controls">
+      <input id="fileInput" type="file" accept="image/*" />
+      <button id="predictUploadBtn">Predict Uploaded Image</button>
+    </div>
 
-    <div class="row">
-      <img id="preview" alt="Uploaded preview will appear here" style="display:none;" />
+    <div>
+      <img id="preview" alt="Uploaded image preview" style="display:none;" />
     </div>
   </div>
 
   <div class="section">
     <h3>Predictions</h3>
+    <div class="status" id="status">Status: Waiting…</div>
+    <div class="best" id="best">Best: —</div>
     <div id="label-container"></div>
   </div>
 
@@ -59,37 +67,60 @@
 
   <!-- Custom JS -->
   <script>
-    let model, maxPredictions;
+    // ------------------------
+    // Configuration
+    // ------------------------
+    // Make sure your repo has:
+    // ./model/model.json
+    // ./model/metadata.json
+    // ./model/weights.bin
+    const MODEL_BASE_URL = "./model/";
 
-    // Webcam state
-    let stream = null;
-    let webcamRunning = false;
-    let currentFacingMode = "user"; // "user" = front, "environment" = back
+    // ------------------------
+    // Elements
+    // ------------------------
+    const cameraModeSelect = document.getElementById("cameraMode");
+    const startWebcamBtn = document.getElementById("startWebcamBtn");
+    const switchBtn = document.getElementById("switchBtn");
+    const stopWebcamBtn = document.getElementById("stopWebcamBtn");
 
     const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
 
-    const labelContainer = document.getElementById("label-container");
-    const cameraModeSelect = document.getElementById("cameraMode");
-
-    // Upload state
     const fileInput = document.getElementById("fileInput");
     const previewImg = document.getElementById("preview");
+    const predictUploadBtn = document.getElementById("predictUploadBtn");
 
-    async function loadModelOnce() {
-      if (model) return;
-      const URL = "./model/";
-      model = await tmImage.load(URL + "model.json", URL + "metadata.json");
-      maxPredictions = model.getTotalClasses();
+    const statusEl = document.getElementById("status");
+    const bestEl = document.getElementById("best");
+    const labelContainer = document.getElementById("label-container");
 
-      labelContainer.innerHTML = "";
-      for (let i = 0; i < maxPredictions; i++) {
-        labelContainer.appendChild(document.createElement("div"));
-      }
+    // ------------------------
+    // Model + state
+    // ------------------------
+    let model = null;
+    let maxPredictions = 0;
+
+    let stream = null;
+    let webcamRunning = false;
+    let currentFacingMode = "user"; // "user" or "environment"
+
+    // ------------------------
+    // Helpers
+    // ------------------------
+    function setStatus(msg) {
+      statusEl.innerText = "Status: " + msg;
     }
 
     function renderPredictions(prediction) {
+      // Find best
+      let best = prediction[0];
+      for (const p of prediction) {
+        if (p.probability > best.probability) best = p;
+      }
+      bestEl.innerText = `Best: ${best.className} (${(best.probability * 100).toFixed(1)}%)`;
+
       for (let i = 0; i < maxPredictions; i++) {
         const p = prediction[i];
         labelContainer.childNodes[i].innerText =
@@ -97,28 +128,56 @@
       }
     }
 
+    async function loadModelOnce() {
+      if (model) return;
+
+      setStatus("Loading model…");
+      const modelURL = MODEL_BASE_URL + "model.json";
+      const metadataURL = MODEL_BASE_URL + "metadata.json";
+
+      model = await tmImage.load(modelURL, metadataURL);
+      maxPredictions = model.getTotalClasses();
+
+      // Prepare UI for predictions
+      labelContainer.innerHTML = "";
+      for (let i = 0; i < maxPredictions; i++) {
+        labelContainer.appendChild(document.createElement("div"));
+      }
+
+      setStatus("Model loaded. Ready.");
+    }
+
     // ------------------------
-    // Webcam functions
+    // Webcam mode
     // ------------------------
     async function startWebcam() {
       await loadModelOnce();
+
       currentFacingMode = cameraModeSelect.value;
+      setStatus("Starting webcam…");
+
       await startCamera(currentFacingMode);
 
       if (!webcamRunning) {
         webcamRunning = true;
         window.requestAnimationFrame(webcamLoop);
       }
+
+      setStatus("Webcam running.");
     }
 
     async function switchCamera() {
-      // If webcam isn't running yet, just toggle selection
       currentFacingMode = (currentFacingMode === "user") ? "environment" : "user";
       cameraModeSelect.value = currentFacingMode;
 
-      if (webcamRunning) {
-        await startCamera(currentFacingMode);
+      if (!webcamRunning) {
+        setStatus("Camera switched (webcam not running yet). Click Start Webcam.");
+        return;
       }
+
+      setStatus("Switching camera…");
+      await startCamera(currentFacingMode);
+      setStatus("Webcam running (camera switched).");
     }
 
     function stopWebcam() {
@@ -128,10 +187,11 @@
         stream = null;
       }
       video.srcObject = null;
+      setStatus("Webcam stopped.");
     }
 
     async function startCamera(facingMode) {
-      // Stop previous stream if any
+      // Stop previous stream
       if (stream) {
         stream.getTracks().forEach(t => t.stop());
         stream = null;
@@ -140,7 +200,7 @@
       const constraints = {
         audio: false,
         video: {
-          facingMode: facingMode, // "user" or "environment"
+          facingMode: facingMode,
           width: { ideal: 320 },
           height: { ideal: 240 }
         }
@@ -149,8 +209,8 @@
       try {
         stream = await navigator.mediaDevices.getUserMedia(constraints);
       } catch (e) {
-        // Fallback if some devices don't support facingMode properly
-        console.warn("Requested camera mode failed, falling back to default camera. Reason:", e);
+        // fallback
+        console.warn("FacingMode request failed, fallback to default camera:", e);
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       }
 
@@ -161,7 +221,7 @@
     async function webcamLoop() {
       if (!webcamRunning) return;
 
-      // Draw video to canvas (mirror front camera only)
+      // Draw frame into canvas (mirror front camera only)
       const flip = (currentFacingMode === "user");
       const w = canvas.width, h = canvas.height;
 
@@ -174,6 +234,7 @@
       }
       ctx.restore();
 
+      // Predict
       const prediction = await model.predict(canvas);
       renderPredictions(prediction);
 
@@ -181,15 +242,19 @@
     }
 
     // ------------------------
-    // Upload image functions
+    // Upload image mode
     // ------------------------
-    fileInput.addEventListener("change", () => {
+    fileInput.addEventListener("change", async () => {
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
 
-      const url = URL.createObjectURL(file);
-      previewImg.src = url;
+      // Show preview
+      previewImg.src = URL.createObjectURL(file);
       previewImg.style.display = "block";
+
+      // Optional: auto-predict immediately after selection
+      // Comment out the next line if you want user to click the button instead.
+      await predictUploadedImage();
     });
 
     async function predictUploadedImage() {
@@ -201,26 +266,36 @@
         return;
       }
 
-      // Ensure image is loaded before predicting
-      if (!previewImg.src) {
-        alert("Image preview not ready. Please reselect the file.");
-        return;
-      }
-
-      // Stop webcam loop if running (optional, avoids confusion)
-      // Uncomment if you want upload mode to stop webcam automatically:
+      // If webcam is running, you can keep it running or stop it.
+      // Stopping avoids confusion (uncomment if you prefer):
       // stopWebcam();
 
-      // Wait for the image to be fully decoded
+      setStatus("Analyzing uploaded image…");
+
+      // Ensure image is fully loaded/decoded
       try {
         if (previewImg.decode) await previewImg.decode();
       } catch (e) {
-        // decode() not supported in some browsers; ignore
+        // ignore if decode not supported
       }
 
+      // Predict directly from the <img>
       const prediction = await model.predict(previewImg);
       renderPredictions(prediction);
+
+      setStatus("Uploaded image analyzed.");
     }
+
+    // ------------------------
+    // Wire buttons
+    // ------------------------
+    startWebcamBtn.addEventListener("click", startWebcam);
+    switchBtn.addEventListener("click", switchCamera);
+    stopWebcamBtn.addEventListener("click", stopWebcam);
+    predictUploadBtn.addEventListener("click", predictUploadedImage);
+
+    // Load model lazily on first action; you can preload it by uncommenting:
+    // loadModelOnce();
   </script>
 </body>
 </html>
